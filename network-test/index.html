@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hyperspace Aces network test</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, Segoe UI, Arial, sans-serif; background: #10141c; color: #e6ebf2; }
+  header { padding: 14px 18px; background: #182030; border-bottom: 1px solid #2a3550; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0 12px 0 0; }
+  main { display: flex; gap: 18px; padding: 18px; flex-wrap: wrap; align-items: flex-start; }
+  canvas { background: #0b0f16; border: 1px solid #2a3550; border-radius: 10px; display: block; }
+  .panel { background: #182030; border: 1px solid #2a3550; border-radius: 10px; padding: 14px; min-width: 300px; flex: 1 1 300px; max-width: 460px; }
+  .panel h2 { font-size: 15px; margin: 0 0 10px; }
+  .check { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-bottom: 1px solid #222c42; }
+  .check:last-child { border-bottom: none; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; margin-top: 4px; flex: none; background: #59657a; }
+  .ok .dot { background: #2ee88a; }
+  .bad .dot { background: #ff5a5a; }
+  .wait .dot { background: #ffc94a; }
+  .check small { display: block; color: #9fb0c8; }
+  input, button { font: inherit; border-radius: 6px; border: 1px solid #39486a; background: #0e1420; color: #e6ebf2; padding: 6px 9px; }
+  button { background: #2b6cff; border-color: #2b6cff; cursor: pointer; font-weight: 600; }
+  button.secondary { background: #253048; border-color: #39486a; }
+  label { display: block; margin: 8px 0 4px; color: #9fb0c8; font-size: 12px; }
+  #setup input { width: 100%; }
+  #verdict { font-weight: 700; font-size: 15px; margin-top: 10px; padding: 10px; border-radius: 8px; background: #222c42; }
+  #verdict.good { background: #12402a; color: #9dffc9; }
+  #verdict.badv { background: #4a1616; color: #ffb3b3; }
+  #players { margin: 6px 0 0; padding-left: 18px; }
+  .hint { color: #9fb0c8; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Hyperspace Aces network test</h1>
+  <span class="hint">Move with WASD or the arrow keys. Open this page on another computer to see each other.</span>
+  <span style="margin-left:auto"></span>
+  <label style="margin:0">Your name <input id="name" maxlength="16" style="width:140px"></label>
+</header>
+
+<main>
+  <canvas id="arena" width="720" height="480"></canvas>
+
+  <div class="panel">
+    <h2>Connection checks</h2>
+    <div class="check" id="c-https"><span class="dot"></span><div>Reach the server<small>Waiting…</small></div></div>
+    <div class="check" id="c-ws"><span class="dot"></span><div>Open a live connection (WebSocket)<small>Waiting…</small></div></div>
+    <div class="check" id="c-join"><span class="dot"></span><div>Join the test room<small>Waiting…</small></div></div>
+    <div class="check" id="c-ping"><span class="dot"></span><div>Round trip time<small>Waiting…</small></div></div>
+    <div class="check" id="c-peer"><span class="dot"></span><div>See another player<small>Waiting for someone else to open the page…</small></div></div>
+    <div id="verdict">Running checks…</div>
+
+    <h2 style="margin-top:16px">In the room</h2>
+    <ul id="players"><li class="hint">Just you so far.</li></ul>
+
+    <div id="setup" style="display:none; margin-top:16px">
+      <h2>Server settings</h2>
+      <p class="hint">Paste your Supabase project URL and its publishable (anon) key. They're saved in this browser only.</p>
+      <label>Project URL</label><input id="cfg-url" placeholder="https://xxxx.supabase.co">
+      <label>Publishable / anon key</label><input id="cfg-key" placeholder="sb_publishable_… or eyJ…">
+      <div style="margin-top:10px; display:flex; gap:8px">
+        <button id="cfg-save">Save and connect</button>
+        <button id="cfg-clear" class="secondary">Clear</button>
+      </div>
+    </div>
+    <p class="hint" style="margin-top:14px"><a href="#" id="show-setup" style="color:#8fb4ff">Server settings</a></p>
+  </div>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  // Fill these in before uploading, so coworkers don't have to. The publishable (anon) key is
+  // meant to be public; it is safe to put here.
+  const SUPABASE_URL = "https://dyxgtjdayfvvyfjyworw.supabase.co";
+  const SUPABASE_KEY = "sb_publishable_WfXAnseJsUSKkLcQSl3bCw_u2cNiOO4";
+
+  const ROOM = "arena-network-test";
+  const SEND_HZ = 15;
+  const STALE_MS = 4000;
+
+  const $ = id => document.getElementById(id);
+  const canvas = $("arena");
+  const ctx = canvas.getContext("2d");
+
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem("arenaTest:" + k); return v === null ? d : v; } catch (_) { return d; } },
+    set(k, v) { try { localStorage.setItem("arenaTest:" + k, v); } catch (_) {} }
+  };
+
+  const config = {
+    url: (SUPABASE_URL || new URLSearchParams(location.search).get("url") || store.get("url", "")).trim().replace(/\/+$/, ""),
+    key: (SUPABASE_KEY || new URLSearchParams(location.search).get("key") || store.get("key", "")).trim()
+  };
+
+  const me = {
+    // A new id for every open page, so two tabs in the same browser count as two players.
+    id: Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4),
+    name: store.get("name", "") || "Player " + Math.floor(Math.random() * 900 + 100),
+    x: 100 + Math.random() * 520,
+    y: 100 + Math.random() * 280,
+    hue: Math.floor(Math.random() * 360)
+  };
+  $("name").value = me.name;
+  $("name").addEventListener("input", e => { me.name = e.target.value.trim() || "Player"; store.set("name", me.name); });
+
+  const peers = new Map(); // id -> {name, hue, x, y, tx, ty, seen}
+  const keys = new Set();
+  const stats = { sent: 0, recv: 0, rtts: [] };
+
+  function setCheck(id, status, text) {
+    const el = $(id);
+    el.className = "check " + status;
+    el.querySelector("small").textContent = text;
+    updateVerdict();
+  }
+
+  function updateVerdict() {
+    const v = $("verdict");
+    const bad = document.querySelector(".check.bad");
+    const peerOk = $("c-peer").classList.contains("ok");
+    const joinOk = $("c-join").classList.contains("ok");
+    if (bad) {
+      v.className = "badv";
+      v.textContent = "Something is blocked. See the red check above.";
+    } else if (peerOk) {
+      v.className = "good";
+      v.textContent = "Live matches will work on this network.";
+    } else if (joinOk) {
+      v.className = "";
+      v.textContent = "Connected. Now open this page on another computer to finish the test.";
+    } else {
+      v.className = "";
+      v.textContent = "Running checks…";
+    }
+  }
+
+  // ------------------------------------------------------------ input and drawing
+
+  window.addEventListener("keydown", e => {
+    if (e.target.tagName === "INPUT") return;
+    const k = e.key.toLowerCase();
+    if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) { keys.add(k); e.preventDefault(); }
+  });
+  window.addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+  window.addEventListener("blur", () => keys.clear());
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+
+    let dx = 0, dy = 0;
+    if (keys.has("a") || keys.has("arrowleft")) dx -= 1;
+    if (keys.has("d") || keys.has("arrowright")) dx += 1;
+    if (keys.has("w") || keys.has("arrowup")) dy -= 1;
+    if (keys.has("s") || keys.has("arrowdown")) dy += 1;
+    if (dx || dy) {
+      const len = Math.hypot(dx, dy);
+      me.x = Math.max(14, Math.min(canvas.width - 14, me.x + dx / len * 260 * dt));
+      me.y = Math.max(14, Math.min(canvas.height - 14, me.y + dy / len * 260 * dt));
+    }
+
+    // Glide other players toward where they last said they were.
+    const t = 1 - Math.pow(0.0005, dt);
+    peers.forEach(p => { p.x += (p.tx - p.x) * t; p.y += (p.ty - p.y) * t; });
+
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  function drawDot(p, isMe) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 12, 0, Math.PI * 2);
+    ctx.fillStyle = `hsl(${p.hue} 80% 60%)`;
+    ctx.fill();
+    if (isMe) { ctx.lineWidth = 3; ctx.strokeStyle = "#fff"; ctx.stroke(); }
+    ctx.fillStyle = "#e6ebf2";
+    ctx.font = "12px system-ui, Arial";
+    ctx.textAlign = "center";
+    ctx.fillText(isMe ? p.name + " (you)" : p.name, p.x, p.y - 20);
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = "#151c2a";
+    ctx.lineWidth = 1;
+    for (let x = 40; x < canvas.width; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke(); }
+    for (let y = 40; y < canvas.height; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke(); }
+    peers.forEach(p => drawDot(p, false));
+    drawDot(me, true);
+  }
+
+  function renderPlayers() {
+    const list = $("players");
+    list.replaceChildren();
+    if (!peers.size) {
+      const li = document.createElement("li");
+      li.className = "hint";
+      li.textContent = "Just you so far.";
+      list.appendChild(li);
+      return;
+    }
+    peers.forEach(p => {
+      const li = document.createElement("li");
+      li.textContent = p.name;
+      list.appendChild(li);
+    });
+  }
+
+  // ------------------------------------------------------------ network (Supabase Realtime, no library)
+
+  let ws = null;
+  let ref = 0;
+  let joinRef = null;
+  let joined = false;
+  let heartbeat = null;
+  let sender = null;
+  let reconnectDelay = 1000;
+  const topic = "realtime:" + ROOM;
+
+  function send(msg) {
+    if (ws && ws.readyState === 1) { ws.send(JSON.stringify(msg)); return true; }
+    return false;
+  }
+
+  function broadcast(event, payload) {
+    if (!joined) return;
+    if (send({ topic, event: "broadcast", payload: { type: "broadcast", event, payload }, ref: String(++ref), join_ref: joinRef })) stats.sent++;
+  }
+
+  async function checkHttps() {
+    setCheck("c-https", "wait", "Contacting " + config.url + " …");
+    try {
+      const res = await fetch(config.url + "/rest/v1/", { headers: { apikey: config.key }, cache: "no-store" });
+      // Any answer means the site is reachable; 401/404 only mean this path wants more.
+      setCheck("c-https", "ok", "Reached the server (HTTP " + res.status + ").");
+      return true;
+    } catch (err) {
+      setCheck("c-https", "bad", "Could not reach the server. The network may block " + new URL(config.url).hostname + ".");
+      return false;
+    }
+  }
+
+  function connect() {
+    const wsUrl = config.url.replace(/^http/, "ws") + "/realtime/v1/websocket?apikey=" + encodeURIComponent(config.key) + "&vsn=1.0.0";
+    setCheck("c-ws", "wait", "Opening…");
+    const openTimer = setTimeout(() => {
+      if (!ws || ws.readyState !== 1) setCheck("c-ws", "bad", "No answer after 10 seconds. The network may block live connections.");
+    }, 10000);
+
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch (err) {
+      clearTimeout(openTimer);
+      setCheck("c-ws", "bad", "The browser refused to open the connection.");
+      return;
+    }
+
+    ws.onopen = () => {
+      clearTimeout(openTimer);
+      reconnectDelay = 1000;
+      setCheck("c-ws", "ok", "Live connection open.");
+      setCheck("c-join", "wait", "Joining…");
+      joinRef = String(++ref);
+      send({
+        topic, event: "phx_join", ref: joinRef, join_ref: joinRef,
+        payload: { config: { broadcast: { self: true, ack: false }, presence: { key: "" }, private: false }, access_token: config.key }
+      });
+      heartbeat = setInterval(() => send({ topic: "phoenix", event: "heartbeat", payload: {}, ref: String(++ref) }), 25000);
+    };
+
+    ws.onmessage = e => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch (_) { return; }
+      if (msg.topic !== topic) return;
+
+      if (msg.event === "phx_reply" && msg.ref === joinRef) {
+        if (msg.payload && msg.payload.status === "ok") {
+          joined = true;
+          setCheck("c-join", "ok", "Joined room \"" + ROOM + "\".");
+          startSending();
+        } else {
+          const why = JSON.stringify(msg.payload && msg.payload.response || msg.payload || {});
+          setCheck("c-join", "bad", "The server refused the room: " + why.slice(0, 160));
+        }
+        return;
+      }
+
+      if (msg.event === "phx_error" || msg.event === "system" && msg.payload && msg.payload.status === "error") {
+        setCheck("c-join", "bad", "Room error: " + JSON.stringify(msg.payload).slice(0, 160));
+        return;
+      }
+
+      if (msg.event === "broadcast" && msg.payload) {
+        stats.recv++;
+        handle(msg.payload.event, msg.payload.payload || {});
+      }
+    };
+
+    ws.onclose = () => {
+      clearTimeout(openTimer);
+      clearInterval(heartbeat);
+      clearInterval(sender);
+      const wasJoined = joined;
+      joined = false;
+      if (wasJoined) setCheck("c-join", "wait", "Connection dropped. Reconnecting…");
+      else if (!document.querySelector("#c-ws.bad")) setCheck("c-ws", "bad", "The connection closed. The network may block live connections, or the key is wrong.");
+      setTimeout(connect, reconnectDelay);
+      reconnectDelay = Math.min(15000, reconnectDelay * 2);
+    };
+
+    ws.onerror = () => {};
+  }
+
+  function startSending() {
+    clearInterval(sender);
+    sender = setInterval(() => {
+      broadcast("pos", { id: me.id, name: me.name, hue: me.hue, x: Math.round(me.x), y: Math.round(me.y) });
+    }, 1000 / SEND_HZ);
+    pingLoop();
+  }
+
+  // Our own messages come back to us (self: true), which times a full round trip through the server.
+  function pingLoop() {
+    if (!joined) return;
+    broadcast("ping", { id: me.id, t: performance.now() });
+    setTimeout(pingLoop, 2000);
+  }
+
+  function handle(event, p) {
+    if (event === "ping") {
+      if (p.id !== me.id) return;
+      const rtt = performance.now() - p.t;
+      stats.rtts.push(rtt);
+      if (stats.rtts.length > 10) stats.rtts.shift();
+      const avg = stats.rtts.reduce((a, b) => a + b, 0) / stats.rtts.length;
+      const status = avg < 150 ? "ok" : avg < 300 ? "wait" : "bad";
+      const words = avg < 150 ? "great for live matches" : avg < 300 ? "playable, a bit laggy" : "too slow for live matches";
+      setCheck("c-ping", status, Math.round(avg) + " ms on average (" + words + ").");
+      return;
+    }
+
+    if (event === "pos") {
+      if (p.id === me.id) return;
+      const existing = peers.get(p.id);
+      if (existing) {
+        Object.assign(existing, { name: String(p.name || "Player").slice(0, 16), hue: Number(p.hue) || 0, tx: Number(p.x), ty: Number(p.y), seen: Date.now() });
+      } else {
+        peers.set(p.id, { name: String(p.name || "Player").slice(0, 16), hue: Number(p.hue) || 0, x: Number(p.x), y: Number(p.y), tx: Number(p.x), ty: Number(p.y), seen: Date.now() });
+        renderPlayers();
+        setCheck("c-peer", "ok", "You can see " + String(p.name || "another player").slice(0, 16) + " move. Ask them if they see you too.");
+      }
+    }
+  }
+
+  // Remove players who closed the page.
+  setInterval(() => {
+    let changed = false;
+    peers.forEach((p, id) => { if (Date.now() - p.seen > STALE_MS) { peers.delete(id); changed = true; } });
+    if (changed) {
+      renderPlayers();
+      if (!peers.size && $("c-peer").classList.contains("ok")) setCheck("c-peer", "ok", "Worked earlier; the other player has left.");
+    }
+  }, 1000);
+
+  // ------------------------------------------------------------ setup
+
+  function showSetup(show) {
+    $("setup").style.display = show ? "block" : "none";
+    $("cfg-url").value = config.url;
+    $("cfg-key").value = config.key;
+  }
+  $("show-setup").addEventListener("click", e => { e.preventDefault(); showSetup($("setup").style.display === "none"); });
+  $("cfg-save").addEventListener("click", () => {
+    store.set("url", $("cfg-url").value.trim());
+    store.set("key", $("cfg-key").value.trim());
+    location.reload();
+  });
+  $("cfg-clear").addEventListener("click", () => { store.set("url", ""); store.set("key", ""); location.reload(); });
+
+  async function start() {
+    requestAnimationFrame(frame);
+    if (!config.url || !config.key) {
+      showSetup(true);
+      $("verdict").textContent = "Add the server settings below to start the test.";
+      return;
+    }
+    if (!/^https:\/\/[^/]+$|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(config.url)) {
+      showSetup(true);
+      setCheck("c-https", "bad", "The project URL should look like https://xxxx.supabase.co");
+      return;
+    }
+    if (await checkHttps()) connect();
+  }
+
+  start();
+})();
+</script>
+</body>
+</html>
